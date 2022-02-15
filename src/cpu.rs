@@ -305,6 +305,24 @@ impl Cpu8080 {
                 self.register_write_word(Register::D, hl);
             }
 
+            // OUT
+            (0xD, 0x3) => {
+                let byte = self.fetch(io);
+
+                debug_println!("OUT #${:02X}", byte);
+
+                // TODO: Implement OUT d8
+            }
+
+            // IN
+            (0xD, 0xB) => {
+                let byte = self.fetch(io);
+
+                debug_println!("IN #${:02X}", byte);
+
+                // TODO: Implement IN d8
+            }
+
             _ => {
                 debug_println!("UNKNOWN");
                 panic!("Unsupported instruction encountered: ${:02X}", op);
