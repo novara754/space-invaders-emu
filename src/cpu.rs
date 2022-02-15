@@ -38,6 +38,16 @@ enum MemReg {
     Register(Register),
 }
 
+impl MemReg {
+    fn from(n: u8) -> Self {
+        if n == 6 {
+            MemReg::Memory
+        } else {
+            MemReg::Register(Register::from(n))
+        }
+    }
+}
+
 impl std::fmt::Debug for MemReg {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -155,9 +165,16 @@ impl Cpu8080 {
             // RET
             (0xC, 0x9) => {
                 debug_println!("RET");
+                self.ret(io);
+            }
 
-                let addr = self.pop(io);
-                self.jump(addr);
+            // RNZ
+            (0xC, 0x0) => {
+                debug_println!("RNZ");
+
+                if !self.get_flag(Flag::Z) {
+                    self.ret(io);
+                }
             }
 
             // CPI
@@ -305,6 +322,98 @@ impl Cpu8080 {
                 self.register_write_word(Register::D, hl);
             }
 
+            // RRC
+            (0x0, 0xF) => {
+                debug_println!("RRC");
+
+                let a = self.register_read(Register::A);
+                let cy = a & 1 > 0;
+                self.register_write(Register::A, a.rotate_right(1));
+                self.update_flag(Flag::C, cy);
+            }
+
+            // ANI
+            (0xE, 0x6) => {
+                let byte = self.fetch(io);
+
+                debug_println!("ANI #${:02X}", byte);
+
+                let a = self.register_read(Register::A);
+                let new_value = a & byte;
+
+                self.register_write(Register::A, new_value);
+                self.update_flag_z(new_value);
+                self.update_flag_s(new_value);
+                self.update_flag_p(new_value);
+                self.update_flag(Flag::C, false);
+            }
+
+            // ADI
+            (0xC, 0x6) => {
+                let byte = self.fetch(io);
+
+                debug_println!("ADI #${:02X}", byte);
+
+                let a = self.register_read(Register::A);
+                let (new_value, cy) = a.overflowing_add(byte);
+
+                self.register_write(Register::A, new_value);
+                self.update_flag_z(new_value);
+                self.update_flag_s(new_value);
+                self.update_flag_p(new_value);
+                self.update_flag(Flag::C, cy);
+            }
+
+            // LDA
+            (0x3, 0xA) => {
+                let addr = self.fetch_word(io);
+                debug_println!("LDA ${:04X}", addr);
+
+                self.register_write(Register::A, io.read(addr));
+            }
+
+            // STA
+            (0x3, 0x2) => {
+                let addr = self.fetch_word(io);
+                debug_println!("STA ${:04X}", addr);
+
+                io.write(addr, self.register_read(Register::A));
+            }
+
+            // ADD, ADC
+            (0x8, _) => {
+                let is_adc = op_lo >= 0x8;
+                let src = if is_adc { op_lo - 0x8 } else { op_lo };
+                let src = MemReg::from(src);
+                let c_in = is_adc && self.get_flag(Flag::C);
+                debug_println!("{} {:?}", if is_adc { "ADC" } else { "ADD" }, src);
+                self.arithmetic(io, src, |a, rhs| a.carrying_add(rhs, c_in));
+            }
+
+            // SUB, SBB
+            (0x9, _) => {
+                let is_sbb = op_lo >= 0x8;
+                let src = if is_sbb { op_lo - 0x8 } else { op_lo };
+                let src = MemReg::from(src);
+                let c_in = is_sbb && self.get_flag(Flag::C);
+                debug_println!("{} {:?}", if is_sbb { "SBB" } else { "SUB" }, src);
+                self.arithmetic(io, src, |a, rhs| a.borrowing_sub(rhs, c_in));
+            }
+
+            // ANA
+            (0xA, 0x0..=0x7) => {
+                let src = MemReg::from(op_lo);
+                debug_println!("ANA {:?}", src);
+                self.arithmetic(io, src, |a, rhs| (a & rhs, false));
+            }
+
+            // XRA
+            (0xA, 0x8..=0xF) => {
+                let src = MemReg::from(op_lo - 0x8);
+                debug_println!("XRA {:?}", src);
+                self.arithmetic(io, src, |a, rhs| (a ^ rhs, false));
+            }
+
             // OUT
             (0xD, 0x3) => {
                 let byte = self.fetch(io);
@@ -328,6 +437,24 @@ impl Cpu8080 {
                 panic!("Unsupported instruction encountered: ${:02X}", op);
             }
         }
+    }
+
+    fn arithmetic<IO: IOManager, F: FnOnce(Byte, Byte) -> (Byte, bool)>(
+        &mut self,
+        io: &mut IO,
+        src: MemReg,
+        f: F,
+    ) {
+        let a = self.register_read(Register::A);
+        let rhs = self.location_read(io, src);
+
+        let (new_a, c_out) = f(a, rhs);
+
+        self.register_write(Register::A, new_a);
+        self.update_flag_z(new_a);
+        self.update_flag_s(new_a);
+        self.update_flag_p(new_a);
+        self.update_flag(Flag::C, c_out);
     }
 
     fn update_flag_z(&mut self, value: Byte) {
@@ -383,6 +510,12 @@ impl Cpu8080 {
     /// Perform a jump
     fn jump(&mut self, addr: Address) {
         self.pc = addr;
+    }
+
+    /// Perform a return from subroutine
+    fn ret<IO: IOManager>(&mut self, io: &mut IO) {
+        let addr = self.pop(io);
+        self.jump(addr);
     }
 
     /// Push a word onto the stack
@@ -570,6 +703,20 @@ mod tests {
             cpu.push(&mut io, addr);
             cpu.step(&mut io);
             assert_eq!(cpu.pc, addr);
+        }
+    }
+
+    #[test]
+    fn inst_rnz() {
+        for addr in [0xABCD, 0x1000, 0x0000] {
+            for (z, exp_pc) in [(false, addr), (true, 0x0001)] {
+                let (mut cpu, mut io) = make_test_cpu(vec![0xC0], Some(0x100));
+                cpu.sp = 0xFF;
+                cpu.update_flag(Flag::Z, z);
+                cpu.push(&mut io, addr);
+                cpu.step(&mut io);
+                assert_eq!(cpu.pc, exp_pc, "addr={:04X}, z={}", addr, z);
+            }
         }
     }
 
@@ -837,6 +984,279 @@ mod tests {
 
                 assert_eq!(cpu.register_read_word(H), de, "hl={:04X}, de={:04}", hl, de);
                 assert_eq!(cpu.register_read_word(D), hl, "hl={:04X}, de={:04}", hl, de);
+            }
+        }
+    }
+
+    #[test]
+    fn inst_rrc() {
+        let val = 0b1110_1010;
+        let cys = [false, true, false, true, false, true, true, true];
+
+        let (mut cpu, mut io) = make_test_cpu(vec![0x0F; 8], None);
+        cpu.register_write(Register::A, val);
+        for (i, cy) in cys.into_iter().enumerate() {
+            cpu.step(&mut io);
+            assert_eq!(
+                cpu.register_read(Register::A),
+                val.rotate_right(i as u32 + 1)
+            );
+            assert_eq!(cpu.get_flag(Flag::C), cy);
+        }
+    }
+
+    #[test]
+    fn inst_ani() {
+        let vals = [0xAB, 0xCD, 0x10, 0x00, 0xF7];
+        for a in vals {
+            for val in vals {
+                let (mut cpu, mut io) = make_test_cpu(vec![0xE6, val], None);
+                cpu.register_write(Register::A, a);
+                cpu.step(&mut io);
+                let new_val = val & a;
+
+                assert_eq!(
+                    cpu.register_read(Register::A),
+                    new_val,
+                    "a={:02X}, val={:02X}",
+                    a,
+                    val
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn inst_adi() {
+        let vals = [0xAB, 0xCD, 0x10, 0x00, 0xF7];
+        for a in vals {
+            for val in vals {
+                let (mut cpu, mut io) = make_test_cpu(vec![0xC6, val], None);
+                cpu.register_write(Register::A, a);
+                cpu.step(&mut io);
+                let new_val = a.wrapping_add(val);
+
+                assert_eq!(
+                    cpu.register_read(Register::A),
+                    new_val,
+                    "a={:02X}, val={:02X}",
+                    a,
+                    val
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn inst_sta_lda() {
+        let addr = 0x1FF0u16;
+        for val in [0xAB, 0xF8, 0x00, 0x01] {
+            let [addr_hi, addr_lo] = addr.to_be_bytes();
+            let (mut cpu, mut io) = make_test_cpu(
+                vec![0x32, addr_lo, addr_hi, 0x3A, addr_lo, addr_hi],
+                Some(addr as usize + 1),
+            );
+            cpu.register_write(Register::A, val);
+
+            cpu.step(&mut io);
+            assert_eq!(io.read(addr), val);
+
+            // Overwrite A with dummy value
+            cpu.register_write(Register::A, 0xD8);
+
+            cpu.step(&mut io);
+            assert_eq!(cpu.register_read(Register::A), val);
+        }
+    }
+
+    #[test]
+    fn inst_add() {
+        let tests = [
+            (0x00, 0x00, 0x00, true, false, false),
+            (0xFF, 0x01, 0x00, true, false, true),
+            (0x7F, 0x01, 0x80, false, true, false),
+            (0x10, 0x02, 0x12, false, false, false),
+        ];
+
+        for test @ (a, rhs, res, z, s, c_out) in tests {
+            for loc in 0..=6 {
+                let op = 0x80 + loc;
+                let loc = MemReg::from(loc);
+                let (mut cpu, mut io) = make_test_cpu(vec![op], Some(0x100));
+
+                cpu.register_write(Register::A, a);
+                cpu.register_write_word(Register::H, 0x00FF);
+                cpu.location_write(&mut io, loc, rhs);
+
+                cpu.step(&mut io);
+
+                assert_eq!(cpu.register_read(Register::A), res, "{:?}", test);
+                assert_eq!(cpu.get_flag(Flag::Z), z, "{:?} Z", test);
+                assert_eq!(cpu.get_flag(Flag::S), s, "{:?} S", test);
+                assert_eq!(cpu.get_flag(Flag::C), c_out, "{:?} C", test);
+            }
+        }
+    }
+
+    #[test]
+    fn inst_adc() {
+        let tests = [
+            (0x00, 0x00, false, 0x00, true, false, false),
+            (0x00, 0x00, true, 0x01, false, false, false),
+            (0xFF, 0x01, false, 0x00, true, false, true),
+            (0xFF, 0x01, true, 0x01, false, false, true),
+            (0xFF, 0x00, false, 0xFF, false, true, false),
+            (0xFF, 0x00, true, 0x00, true, false, true),
+            (0x7F, 0x01, false, 0x80, false, true, false),
+            (0x7F, 0x01, true, 0x81, false, true, false),
+            (0x10, 0x02, false, 0x12, false, false, false),
+            (0x10, 0x02, true, 0x13, false, false, false),
+        ];
+
+        for test @ (a, rhs, c_in, res, z, s, c_out) in tests {
+            for loc in 0..=6 {
+                let op = 0x88 + loc;
+                let loc = MemReg::from(loc);
+                let (mut cpu, mut io) = make_test_cpu(vec![op], Some(0x100));
+
+                cpu.update_flag(Flag::C, c_in);
+                cpu.register_write(Register::A, a);
+                cpu.register_write_word(Register::H, 0x00FF);
+                cpu.location_write(&mut io, loc, rhs);
+
+                cpu.step(&mut io);
+
+                assert_eq!(cpu.register_read(Register::A), res, "{:?}", test);
+                assert_eq!(cpu.get_flag(Flag::Z), z, "{:?} Z", test);
+                assert_eq!(cpu.get_flag(Flag::S), s, "{:?} S", test);
+                assert_eq!(cpu.get_flag(Flag::C), c_out, "{:?} C", test);
+            }
+        }
+    }
+
+    #[test]
+    fn inst_sub() {
+        let tests = [
+            (0x00, 0x00, 0x00, true, false, false),
+            (0xFF, 0x01, 0xFE, false, true, false),
+            (0xFF, 0x00, 0xFF, false, true, false),
+            (0x80, 0x01, 0x7F, false, false, false),
+            (0x10, 0x02, 0x0E, false, false, false),
+        ];
+
+        for test @ (a, rhs, res, z, s, c_out) in tests {
+            for loc in 0..=6 {
+                let op = 0x90 + loc;
+                let loc = MemReg::from(loc);
+                let (mut cpu, mut io) = make_test_cpu(vec![op], Some(0x100));
+
+                cpu.register_write(Register::A, a);
+                cpu.register_write_word(Register::H, 0x00FF);
+                cpu.location_write(&mut io, loc, rhs);
+
+                cpu.step(&mut io);
+
+                assert_eq!(cpu.register_read(Register::A), res, "{:?}", test);
+                assert_eq!(cpu.get_flag(Flag::Z), z, "{:?} Z", test);
+                assert_eq!(cpu.get_flag(Flag::S), s, "{:?} S", test);
+                assert_eq!(cpu.get_flag(Flag::C), c_out, "{:?} C", test);
+            }
+        }
+    }
+
+    #[test]
+    fn inst_sbb() {
+        let tests = [
+            (0x00, 0x00, false, 0x00, true, false, false),
+            (0x00, 0x00, true, 0xFF, false, true, true),
+            (0xFF, 0x01, false, 0xFE, false, true, false),
+            (0xFF, 0x01, true, 0xFD, false, true, false),
+            (0xFF, 0x00, false, 0xFF, false, true, false),
+            (0xFF, 0x00, true, 0xFE, false, true, false),
+            (0x80, 0x01, false, 0x7F, false, false, false),
+            (0x80, 0x01, true, 0x7E, false, false, false),
+            (0x10, 0x02, false, 0x0E, false, false, false),
+            (0x10, 0x02, true, 0x0D, false, false, false),
+        ];
+
+        for test @ (a, rhs, c_in, res, z, s, c_out) in tests {
+            for loc in 0..=6 {
+                let op = 0x98 + loc;
+                let loc = MemReg::from(loc);
+                let (mut cpu, mut io) = make_test_cpu(vec![op], Some(0x100));
+
+                cpu.update_flag(Flag::C, c_in);
+                cpu.register_write(Register::A, a);
+                cpu.register_write_word(Register::H, 0x00FF);
+                cpu.location_write(&mut io, loc, rhs);
+
+                cpu.step(&mut io);
+
+                assert_eq!(cpu.register_read(Register::A), res, "{:?}", test);
+                assert_eq!(cpu.get_flag(Flag::Z), z, "{:?} Z", test);
+                assert_eq!(cpu.get_flag(Flag::S), s, "{:?} S", test);
+                assert_eq!(cpu.get_flag(Flag::C), c_out, "{:?} C", test);
+            }
+        }
+    }
+
+    #[test]
+    fn inst_ana() {
+        let tests = [
+            (0x00, 0x00, 0x00, true, false),
+            (0xFF, 0x01, 0x01, false, false),
+            (0xFF, 0x00, 0x00, true, false),
+            (0x8C, 0x0F, 0x0C, false, false),
+            (0x8C, 0xFF, 0x8C, false, true),
+        ];
+
+        for test @ (a, rhs, res, z, s) in tests {
+            for loc in 0..=6 {
+                let op = 0xA0 + loc;
+                let loc = MemReg::from(loc);
+                let (mut cpu, mut io) = make_test_cpu(vec![op], Some(0x100));
+
+                cpu.register_write(Register::A, a);
+                cpu.register_write_word(Register::H, 0x00FF);
+                cpu.location_write(&mut io, loc, rhs);
+
+                cpu.step(&mut io);
+
+                assert_eq!(cpu.register_read(Register::A), res, "{:?}", test);
+                assert_eq!(cpu.get_flag(Flag::Z), z, "{:?} Z", test);
+                assert_eq!(cpu.get_flag(Flag::S), s, "{:?} S", test);
+                assert!(!cpu.get_flag(Flag::C), "{:?} C", test);
+            }
+        }
+    }
+
+    #[test]
+    fn inst_xra() {
+        let tests = [
+            (0x00, 0x00, 0x00, true, false),
+            (0xFF, 0x01, 0xFE, false, true),
+            (0xFF, 0xFF, 0x00, true, false),
+            (0xFF, 0x00, 0xFF, false, true),
+            (0x8C, 0x0F, 0x83, false, true),
+            (0x8C, 0xFF, 0x73, false, false),
+        ];
+
+        for test @ (a, rhs, res, z, s) in tests {
+            for loc in 0..=6 {
+                let op = 0xA8 + loc;
+                let loc = MemReg::from(loc);
+                let (mut cpu, mut io) = make_test_cpu(vec![op], Some(0x100));
+
+                cpu.register_write(Register::A, a);
+                cpu.register_write_word(Register::H, 0x00FF);
+                cpu.location_write(&mut io, loc, rhs);
+
+                cpu.step(&mut io);
+
+                assert_eq!(cpu.register_read(Register::A), res, "{:?}", test);
+                assert_eq!(cpu.get_flag(Flag::Z), z, "{:?} Z", test);
+                assert_eq!(cpu.get_flag(Flag::S), s, "{:?} S", test);
+                assert!(!cpu.get_flag(Flag::C), "{:?} C", test);
             }
         }
     }
