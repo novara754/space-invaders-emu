@@ -1,0 +1,13 @@
+[package]
+name = "space-invaders"
+description = "A Space Invader cabinet emulator with supporting toolset"
+authors = ["vzwGrey <vzwgrey@gmail.com>"]
+license-file = "LICENSE"
+readme = "README.md"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+
+
