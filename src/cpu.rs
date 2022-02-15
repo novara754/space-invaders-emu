@@ -281,6 +281,30 @@ impl Cpu8080 {
                 self.register_write_word(dst, word);
             }
 
+            // DAD
+            (0x0..=0x3, 0x9) => {
+                use Register::*;
+                let src = [B, D, H, SP][op_hi as usize];
+
+                debug_println!("DAD {:?}", src);
+
+                let hl = self.register_read_word(Register::H);
+                let word = self.register_read_word(src);
+                let (res, cy) = hl.overflowing_add(word);
+                self.register_write_word(Register::H, res);
+                self.update_flag(Flag::C, cy);
+            }
+
+            // XCHG
+            (0xE, 0xB) => {
+                debug_println!("XCHG");
+
+                let hl = self.register_read_word(Register::H);
+                let de = self.register_read_word(Register::D);
+                self.register_write_word(Register::H, de);
+                self.register_write_word(Register::D, hl);
+            }
+
             _ => {
                 debug_println!("UNKNOWN");
                 panic!("Unsupported instruction encountered: ${:02X}", op);
@@ -738,6 +762,63 @@ mod tests {
                 cpu.step(&mut io);
 
                 assert_eq!(cpu.register_read_word(reg), val, "POP {:?}", reg,);
+            }
+        }
+    }
+
+    #[test]
+    fn inst_dad() {
+        use Register::*;
+        let vals = [0xABCD, 0x0000, 0x1000];
+        for (reg, dad) in [(B, 0x09), (D, 0x19), (H, 0x29), (SP, 0x39)] {
+            for hl in vals {
+                for val in vals {
+                    let (mut cpu, mut io) = make_test_cpu(vec![dad], None);
+                    cpu.register_write_word(H, hl);
+                    cpu.register_write_word(reg, val);
+
+                    cpu.step(&mut io);
+
+                    let (res, cy) = if reg != H {
+                        val.overflowing_add(hl)
+                    } else {
+                        val.overflowing_add(val)
+                    };
+                    assert_eq!(
+                        cpu.register_read_word(H),
+                        res,
+                        "DAD {:?} (hl={:04X}, val={:04X})",
+                        reg,
+                        hl,
+                        val
+                    );
+                    assert_eq!(
+                        cpu.get_flag(Flag::C),
+                        cy,
+                        "DAD {:?} (hl={:04X}, val={:04X})",
+                        reg,
+                        hl,
+                        val
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn inst_xchg() {
+        use Register::*;
+        let vals = [0xABCD, 0x1000, 0x0000, 0x0001];
+        for hl in vals {
+            for de in vals {
+                let (mut cpu, mut io) = make_test_cpu(vec![0xEB], None);
+                cpu.register_write_word(H, hl);
+                cpu.register_write_word(D, de);
+
+                cpu.step(&mut io);
+
+                assert_eq!(cpu.register_read_word(H), de, "hl={:04X}, de={:04}", hl, de);
+                assert_eq!(cpu.register_read_word(D), hl, "hl={:04X}, de={:04}", hl, de);
             }
         }
     }
