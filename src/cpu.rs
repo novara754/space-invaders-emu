@@ -2,7 +2,7 @@
 //!
 //! See the 8080 Programmer's Manual.
 
-use crate::{debug_print, debug_println};
+use crate::{console_log, debug_print, debug_println};
 
 /// 8080 byte size
 pub type Byte = u8;
@@ -17,6 +17,8 @@ pub type Address = u16;
 pub trait IOManager {
     fn read(&self, addr: Address) -> Byte;
     fn write(&mut self, addr: Address, byte: Byte);
+    fn port_read(&mut self, port: Byte) -> Byte;
+    fn port_write(&mut self, port: Byte, byte: Byte);
 }
 
 /// Enumeration of 8080 registers
@@ -108,6 +110,9 @@ pub struct Cpu8080 {
 
     /// CPU flags
     flags: Byte,
+
+    /// Interrupt enabled flag
+    interrupt_enabled: bool,
 }
 
 impl Cpu8080 {
@@ -118,6 +123,7 @@ impl Cpu8080 {
             sp: 0,
             gprs: [0; 7],
             flags: 1 << 1,
+            interrupt_enabled: false,
         }
     }
 
@@ -133,6 +139,18 @@ impl Cpu8080 {
             // NOP
             (0x0, 0x0) => {
                 debug_println!("NOP");
+            }
+
+            // EI
+            (0xF, 0xB) => {
+                debug_println!("EI");
+                self.interrupt_enabled = true;
+            }
+
+            //DI
+            (0xF, 0x3) => {
+                debug_println!("DI");
+                self.interrupt_enabled = false;
             }
 
             // JMP
@@ -156,9 +174,7 @@ impl Cpu8080 {
             // CALL
             (0xC..=0xF, 0xD) => {
                 let addr = self.fetch_word(io);
-                self.push(io, self.pc);
-                self.jump(addr);
-
+                self.call(io, addr);
                 debug_println!("CALL ${:04X}", addr);
             }
 
@@ -416,26 +432,35 @@ impl Cpu8080 {
 
             // OUT
             (0xD, 0x3) => {
-                let byte = self.fetch(io);
+                let port = self.fetch(io);
 
-                debug_println!("OUT #${:02X}", byte);
+                debug_println!("OUT #${:02X}", port);
 
-                // TODO: Implement OUT d8
+                io.port_write(port, self.register_read(Register::A));
             }
 
             // IN
             (0xD, 0xB) => {
-                let byte = self.fetch(io);
+                let port = self.fetch(io);
 
-                debug_println!("IN #${:02X}", byte);
+                debug_println!("IN #${:02X}", port);
 
-                // TODO: Implement IN d8
+                console_log!("in={}", io.port_read(port));
+                self.register_write(Register::A, io.port_read(port));
             }
 
             _ => {
                 debug_println!("UNKNOWN");
                 panic!("Unsupported instruction encountered: ${:02X}", op);
             }
+        }
+    }
+
+    /// Raise an interrupt, which the CPU will start handling with the next `step`
+    pub fn raise_int<IO: IOManager>(&mut self, io: &mut IO, int_num: u16) {
+        if self.interrupt_enabled {
+            debug_println!("RST {}", int_num);
+            self.call(io, int_num * 8);
         }
     }
 
@@ -510,6 +535,12 @@ impl Cpu8080 {
     /// Perform a jump
     fn jump(&mut self, addr: Address) {
         self.pc = addr;
+    }
+
+    /// Perform a call to a subroutine, saving the return address
+    fn call<IO: IOManager>(&mut self, io: &mut IO, addr: Address) {
+        self.push(io, self.pc);
+        self.jump(addr);
     }
 
     /// Perform a return from subroutine
@@ -634,6 +665,14 @@ mod tests {
 
         fn write(&mut self, addr: Address, byte: Byte) {
             self.mem[addr as usize] = byte;
+        }
+
+        fn port_read(&mut self, _port: Byte) -> Byte {
+            0x00
+        }
+
+        fn port_write(&mut self, _port: Byte, _byte: Byte) {
+            ()
         }
     }
 
