@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Space Invaders</title>
+
+  <style>
+    root,
+    body,
+    #game-view {
+      width: 100%;
+      height: 100%;
+      display: block;
+      margin: 0;
+      padding: 0;
+    }
+
+    #game-view {
+      width: 100vw !important;
+      height: 100vh !important;
+    }
+  </style>
+</head>
+
+<body>
+  <canvas id="game-view" width="224" height="256" tabindex="1"></canvas>
+
+  <script type="module">
+    import init, { Emulator, key_start, key_left, key_right, key_shoot } from './pkg/space_invaders.js';
+
+    const canvas = document.getElementById("game-view");
+    const ctx = canvas.getContext("2d");
+
+    async function run() {
+      await init();
+
+      const emu = new Emulator();
+
+      canvas.addEventListener('keydown', (ev) => {
+        ev.preventDefault();
+
+        if (ev.key == 'a') {
+          emu.key_down(key_left());
+        } else if (ev.key == 'd') {
+          emu.key_down(key_right());
+        } else if (ev.code == 'Space') {
+          emu.key_down(key_shoot());
+        } else if (ev.key == 'Control') {
+          emu.key_down(key_start());
+        }
+      });
+
+      canvas.addEventListener('keyup', (ev) => {
+        ev.preventDefault();
+
+        if (ev.key == 'a') {
+          emu.key_up(key_left());
+        } else if (ev.key == 'd') {
+          emu.key_up(key_right());
+        } else if (ev.code == 'Space') {
+          emu.key_up(key_shoot());
+        } else if (ev.key == 'Control') {
+          emu.key_up(key_start());
+        }
+      });
+
+      let last_int = -Infinity;
+      let f = () => {
+        const do_int = (Date.now() / 1000 - last_int) > (1 / 30);
+        if (do_int) {
+          // emu.raise_int(2);
+          last_int = Date.now() / 1000;
+        }
+
+        for (let i = 0; i < 30000; i++) {
+          emu.step();
+        }
+
+        if (do_int) {
+          emu.draw(ctx, window.innerWidth, window.innerHeight);
+        }
+
+        window.requestAnimationFrame(f);
+      }
+      window.requestAnimationFrame(f);
+    }
+    run();
+  </script>
+</body>
+
+</html>

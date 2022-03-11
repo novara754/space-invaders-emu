@@ -7,11 +7,23 @@ readme = "README.md"
 version = "0.1.0"
 edition = "2021"
 publish = false
-default-run = "emu"
+
+[lib]
+crate-type = ["cdylib"]
 
 [dependencies]
 eyre = "0.6.6"
 clap = { version = "3.0.14", features = ["derive"] }
+wasm-bindgen = "0.2.79"
+console_error_panic_hook = "0.1.7"
 
-[[bin]]
-name = "emu"
+[dependencies.web-sys]
+version = "0.3.4"
+features = [
+  "CanvasRenderingContext2d",
+  "Document",
+  "Element",
+  "HtmlCanvasElement",
+  "Window",
+  "ImageData",
+]
