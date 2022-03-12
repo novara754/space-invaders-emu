@@ -245,11 +245,11 @@ fn main() -> Result<()> {
         for int in 1..=2 {
             cpu.raise_int(&mut io, int);
 
-            for _ in 0..66666 {
+            for _ in 0..6666 {
                 cpu.step(&mut io);
             }
 
-            std::thread::sleep(std::time::Duration::new(0, 1_000_000_000u32 / 30));
+            std::thread::sleep(std::time::Duration::new(0, 1_000_000_000u32 / 120));
         }
 
         draw(&io, &mut canvas)?;
