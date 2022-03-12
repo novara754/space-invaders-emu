@@ -30,6 +30,14 @@ struct IO {
     buttons2: Byte,
 }
 
+fn set_bit(n: &mut u8, val: bool, bit: usize) {
+    if val {
+        *n |= 1 << bit;
+    } else {
+        *n &= !(1 << bit);
+    }
+}
+
 impl IO {
     pub fn new(org: usize, rom: &[Byte]) -> Self {
         let mut rom_ = vec![0; 0x2000];
@@ -46,9 +54,29 @@ impl IO {
             shift_reg_lo: 0,
             shift_offset: 0,
 
-            buttons1: 0x01,
-            buttons2: 0x00,
+            buttons1: 0b0000_0000,
+            buttons2: 0b1000_0000,
         }
+    }
+
+    fn coin(&mut self, val: bool) {
+        set_bit(&mut self.buttons1, val, 0);
+    }
+
+    fn p1_start(&mut self, val: bool) {
+        set_bit(&mut self.buttons1, val, 2);
+    }
+
+    fn p1_shoot(&mut self, val: bool) {
+        set_bit(&mut self.buttons1, val, 4);
+    }
+
+    fn p1_left(&mut self, val: bool) {
+        set_bit(&mut self.buttons1, val, 5);
+    }
+
+    fn p1_right(&mut self, val: bool) {
+        set_bit(&mut self.buttons1, val, 6);
     }
 }
 
@@ -65,7 +93,7 @@ impl IOManager for IO {
 
     fn write(&mut self, addr: Address, byte: Byte) {
         match addr {
-            0x0000..=0x1FFF => self.rom[addr as usize] = byte,
+            0x0000..=0x1FFF => panic!("attempt to write to ROM"), // self.rom[addr as usize] = byte,
             0x2000..=0x23FF => self.ram[(addr - 0x2000) as usize] = byte,
             0x2400..=0x3FFF => {
                 self.vram[(addr - 0x2400) as usize] = byte;
@@ -85,7 +113,7 @@ impl IOManager for IO {
                 let result = (shift_reg >> (8 - self.shift_offset)) & 0xFF;
                 result as u8
             }
-            _ => unreachable!(),
+            _ => unimplemented!(),
         }
     }
 
@@ -103,10 +131,10 @@ impl IOManager for IO {
     }
 }
 
-fn draw(io: &IO, canvas: &mut sdl2::render::Canvas<sdl2::video::Window>) -> Result<()> {
-    const SCREEN_HEIGHT: usize = 256;
-    const SCREEN_WIDTH: usize = 224;
+const SCREEN_HEIGHT: usize = 256;
+const SCREEN_WIDTH: usize = 224;
 
+fn draw(io: &IO, canvas: &mut sdl2::render::Canvas<sdl2::video::Window>) -> Result<()> {
     let mut img = [0u8; SCREEN_HEIGHT * SCREEN_WIDTH * 3];
 
     let bytes_per_row = SCREEN_HEIGHT / 8;
@@ -158,7 +186,11 @@ fn main() -> Result<()> {
     let video_sub = ctx.video().map_err(Report::msg)?;
 
     let window = video_sub
-        .window("Space Invaders Emulator", 224, 256)
+        .window(
+            "Space Invaders Emulator",
+            3 * SCREEN_WIDTH as u32,
+            3 * SCREEN_HEIGHT as u32,
+        )
         .position_centered()
         .opengl()
         .build()?;
@@ -176,23 +208,52 @@ fn main() -> Result<()> {
             if let Event::Quit { .. } = event {
                 break 'main_loop;
             }
-        }
 
-        for _ in 0..2 {
-            cpu.raise_int(&mut io, 2);
-
-            for _ in 0..15000 {
-                cpu.step(&mut io);
+            if let Event::KeyDown {
+                keycode: Some(keycode),
+                ..
+            } = event
+            {
+                use sdl2::keyboard::Keycode;
+                match keycode {
+                    Keycode::C => io.coin(true),
+                    Keycode::LCtrl => io.p1_start(true),
+                    Keycode::Space => io.p1_shoot(true),
+                    Keycode::A => io.p1_left(true),
+                    Keycode::D => io.p1_right(true),
+                    _ => {}
+                }
             }
 
-            if io.wrote_vram {
-                draw(&io, &mut canvas)?;
-                canvas.present();
-                io.wrote_vram = false;
+            if let Event::KeyUp {
+                keycode: Some(keycode),
+                ..
+            } = event
+            {
+                use sdl2::keyboard::Keycode;
+                match keycode {
+                    Keycode::C => io.coin(false),
+                    Keycode::LCtrl => io.p1_start(false),
+                    Keycode::Space => io.p1_shoot(false),
+                    Keycode::A => io.p1_left(false),
+                    Keycode::D => io.p1_right(false),
+                    _ => {}
+                }
+            }
+        }
+
+        for int in 1..=2 {
+            cpu.raise_int(&mut io, int);
+
+            for _ in 0..66666 {
+                cpu.step(&mut io);
             }
 
             std::thread::sleep(std::time::Duration::new(0, 1_000_000_000u32 / 30));
         }
+
+        draw(&io, &mut canvas)?;
+        canvas.present();
     }
 
     Ok(())

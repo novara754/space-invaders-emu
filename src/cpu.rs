@@ -34,6 +34,17 @@ enum Register {
     SP,
 }
 
+impl std::convert::From<u8> for Register {
+    fn from(n: u8) -> Self {
+        use Register::*;
+        if n == 7 {
+            A
+        } else {
+            [B, C, D, E, H, L][n as usize]
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum MemReg {
     Memory,
@@ -57,33 +68,6 @@ impl std::fmt::Debug for MemReg {
             Self::Memory => write!(f, "M"),
             Self::Register(r) => write!(f, "{:?}", r),
             Self::Immediate(i) => write!(f, "#${:02X}", i),
-        }
-    }
-}
-
-impl std::convert::From<u8> for Register {
-    fn from(n: u8) -> Self {
-        use Register::*;
-        if n == 7 {
-            A
-        } else {
-            [B, C, D, E, H, L][n as usize]
-        }
-    }
-}
-
-impl Register {
-    fn offset(self) -> usize {
-        use Register::*;
-        match self {
-            B => 0,
-            C => 1,
-            D => 2,
-            E => 3,
-            H => 4,
-            L => 5,
-            A => 6,
-            _ => panic!("Invalid register"),
         }
     }
 }
@@ -841,6 +825,25 @@ impl Cpu8080 {
                 debug_println!("CMA");
                 let a = self.register_read(Register::A);
                 self.register_write(Register::A, !a);
+            }
+
+            // DAA
+            (0x2, 0x7) => {
+                debug_println!("DAA");
+                let mut a = self.register_read(Register::A);
+                if (a & 0xF) > 9 {
+                    a += 6;
+                }
+                let (new_a, cy) = if (a & 0xF0) > 0x90 {
+                    a.overflowing_add(0x60)
+                } else {
+                    (a, false)
+                };
+                self.register_write(Register::A, a);
+                self.update_flag_z(new_a);
+                self.update_flag_s(new_a);
+                self.update_flag_p(new_a);
+                self.update_flag(Flag::C, cy);
             }
 
             // OUT
