@@ -2,3 +2,4 @@
 Cargo.lock
 /roms
 disasm.rs
+log

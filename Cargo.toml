@@ -12,6 +12,7 @@ default-run = "emu"
 [dependencies]
 eyre = "0.6.6"
 clap = { version = "3.0.14", features = ["derive"] }
+sdl2 = "0.35"
 
 [[bin]]
 name = "emu"

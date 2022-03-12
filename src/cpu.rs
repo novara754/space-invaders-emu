@@ -17,6 +17,8 @@ pub type Address = u16;
 pub trait IOManager {
     fn read(&self, addr: Address) -> Byte;
     fn write(&mut self, addr: Address, byte: Byte);
+    fn port_write(&mut self, port: Byte, byte: Byte);
+    fn port_read(&mut self, port: Byte) -> Byte;
 }
 
 /// Enumeration of 8080 registers
@@ -36,6 +38,7 @@ enum Register {
 enum MemReg {
     Memory,
     Register(Register),
+    Immediate(Byte),
 }
 
 impl MemReg {
@@ -53,6 +56,7 @@ impl std::fmt::Debug for MemReg {
         match self {
             Self::Memory => write!(f, "M"),
             Self::Register(r) => write!(f, "{:?}", r),
+            Self::Immediate(i) => write!(f, "#${:02X}", i),
         }
     }
 }
@@ -98,16 +102,39 @@ enum Flag {
 #[derive(Debug, Default)]
 pub struct Cpu8080 {
     /// Program counter
-    pc: Address,
+    pub pc: Address,
 
     /// Stack pointer
     sp: Address,
 
-    /// General purpose registers
-    gprs: [Byte; 7],
+    // /// General purpose registers
+    // gprs: [Byte; 7],
+    /// General purpose register A
+    gpr_a: Byte,
+
+    /// General purpose register B
+    gpr_b: Byte,
+
+    /// General purpose register C
+    gpr_c: Byte,
+
+    /// General purpose register D
+    gpr_d: Byte,
+
+    /// General purpose register E
+    gpr_e: Byte,
+
+    /// General purpose register H
+    gpr_h: Byte,
+
+    /// General purpose register L
+    gpr_l: Byte,
 
     /// CPU flags
     flags: Byte,
+
+    /// Interrupt enabled flag
+    interrupt_enabled: bool,
 }
 
 impl Cpu8080 {
@@ -116,8 +143,16 @@ impl Cpu8080 {
         Self {
             pc: 0,
             sp: 0,
-            gprs: [0; 7],
+            // gprs: [0; 7],
+            gpr_a: 0,
+            gpr_b: 0,
+            gpr_c: 0,
+            gpr_d: 0,
+            gpr_e: 0,
+            gpr_h: 0,
+            gpr_l: 0,
             flags: 1 << 1,
+            interrupt_enabled: false,
         }
     }
 
@@ -126,6 +161,9 @@ impl Cpu8080 {
         debug_print!("{:04X}    ", self.pc);
 
         let op = self.fetch(io);
+
+        debug_print!("{:02X}    ", op);
+
         let op_hi = (op >> 4) & 0xF;
         let op_lo = op & 0xF;
 
@@ -135,20 +173,101 @@ impl Cpu8080 {
                 debug_println!("NOP");
             }
 
+            // EI
+            (0xF, 0xB) => {
+                debug_println!("EI");
+                self.interrupt_enabled = true;
+            }
+
+            // DI
+            (0xF, 0x3) => {
+                debug_println!("DI");
+                self.interrupt_enabled = false;
+            }
+
             // JMP
             (0xC, 0x3) => {
                 let addr = self.fetch_word(io);
-                self.jump(addr);
-
                 debug_println!("JUMP ${:04X}", addr);
+                self.jump(addr);
             }
 
             // JNZ
             (0xC, 0x2) => {
                 let addr = self.fetch_word(io);
-
                 debug_println!("JNZ ${:04X}", addr);
+
                 if !self.get_flag(Flag::Z) {
+                    self.jump(addr);
+                }
+            }
+
+            // JZ
+            (0xC, 0xA) => {
+                let addr = self.fetch_word(io);
+                debug_println!("JZ ${:04X}", addr);
+
+                if self.get_flag(Flag::Z) {
+                    self.jump(addr);
+                }
+            }
+
+            // JC
+            (0xD, 0xA) => {
+                let addr = self.fetch_word(io);
+                debug_println!("JC ${:04X}", addr);
+
+                if self.get_flag(Flag::C) {
+                    self.jump(addr);
+                }
+            }
+
+            // JNC
+            (0xD, 0x2) => {
+                let addr = self.fetch_word(io);
+                debug_println!("JNC ${:04X}", addr);
+
+                if !self.get_flag(Flag::C) {
+                    self.jump(addr);
+                }
+            }
+
+            // JPE
+            (0xE, 0xA) => {
+                let addr = self.fetch_word(io);
+                debug_println!("JPE ${:04X}", addr);
+
+                if self.get_flag(Flag::P) {
+                    self.jump(addr);
+                }
+            }
+
+            // JPO
+            (0xE, 0x2) => {
+                let addr = self.fetch_word(io);
+                debug_println!("JPO ${:04X}", addr);
+
+                if !self.get_flag(Flag::P) {
+                    self.jump(addr);
+                }
+            }
+
+            // JP
+            (0xF, 0x2) => {
+                let addr = self.fetch_word(io);
+                debug_println!("JP ${:04X}", addr);
+
+                if !self.get_flag(Flag::S) {
+                    self.jump(addr);
+                }
+            }
+
+            // JM
+            (0xF, 0xA) => {
+                let addr = self.fetch_word(io);
+                debug_println!("JM ${:04X}", addr);
+
+                if self.get_flag(Flag::S) {
                     self.jump(addr);
                 }
             }
@@ -156,10 +275,80 @@ impl Cpu8080 {
             // CALL
             (0xC..=0xF, 0xD) => {
                 let addr = self.fetch_word(io);
-                self.push(io, self.pc);
-                self.jump(addr);
-
                 debug_println!("CALL ${:04X}", addr);
+                self.call(io, addr);
+            }
+
+            // CZ
+            (0xC, 0xC) => {
+                let addr = self.fetch_word(io);
+                debug_println!("CZ ${:04X}", addr);
+                if self.get_flag(Flag::Z) {
+                    self.call(io, addr);
+                }
+            }
+
+            // CNZ
+            (0xC, 0x4) => {
+                let addr = self.fetch_word(io);
+                debug_println!("CNZ ${:04X}", addr);
+                if !self.get_flag(Flag::Z) {
+                    self.call(io, addr);
+                }
+            }
+
+            // CC
+            (0xD, 0xC) => {
+                let addr = self.fetch_word(io);
+                debug_println!("CC ${:04X}", addr);
+                if self.get_flag(Flag::C) {
+                    self.call(io, addr);
+                }
+            }
+
+            // CNC
+            (0xD, 0x4) => {
+                let addr = self.fetch_word(io);
+                debug_println!("CNC ${:04X}", addr);
+                if !self.get_flag(Flag::C) {
+                    self.call(io, addr);
+                }
+            }
+
+            // CPE
+            (0xE, 0xC) => {
+                let addr = self.fetch_word(io);
+                debug_println!("CPE ${:04X}", addr);
+                if self.get_flag(Flag::P) {
+                    self.call(io, addr);
+                }
+            }
+
+            // CPO
+            (0xE, 0x4) => {
+                let addr = self.fetch_word(io);
+                debug_println!("CPO ${:04X}", addr);
+                if !self.get_flag(Flag::P) {
+                    self.call(io, addr);
+                }
+            }
+
+            // CP
+            (0xF, 0x4) => {
+                let addr = self.fetch_word(io);
+                debug_println!("CP ${:04X}", addr);
+                if !self.get_flag(Flag::S) {
+                    self.call(io, addr);
+                }
+            }
+
+            // CM
+            (0xF, 0xC) => {
+                let addr = self.fetch_word(io);
+                debug_println!("CM ${:04X}", addr);
+                if self.get_flag(Flag::S) {
+                    self.call(io, addr);
+                }
             }
 
             // RET
@@ -177,16 +366,83 @@ impl Cpu8080 {
                 }
             }
 
+            // RZ
+            (0xC, 0x8) => {
+                debug_println!("RZ");
+
+                if self.get_flag(Flag::Z) {
+                    self.ret(io);
+                }
+            }
+
+            // RNC
+            (0xD, 0x0) => {
+                debug_println!("RNC");
+
+                if !self.get_flag(Flag::C) {
+                    self.ret(io);
+                }
+            }
+
+            // RC
+            (0xD, 0x8) => {
+                debug_println!("RC");
+
+                if self.get_flag(Flag::C) {
+                    self.ret(io);
+                }
+            }
+
+            // RPO
+            (0xE, 0x0) => {
+                debug_println!("RPO");
+
+                if !self.get_flag(Flag::P) {
+                    self.ret(io);
+                }
+            }
+
+            // RPE
+            (0xE, 0x8) => {
+                debug_println!("RPE");
+
+                if self.get_flag(Flag::P) {
+                    self.ret(io);
+                }
+            }
+
+            // RP
+            (0xF, 0x0) => {
+                debug_println!("RP");
+
+                if !self.get_flag(Flag::S) {
+                    self.ret(io);
+                }
+            }
+
+            // RM
+            (0xF, 0x8) => {
+                debug_println!("RM");
+
+                if self.get_flag(Flag::S) {
+                    self.ret(io);
+                }
+            }
+
             // CPI
             (0xF, 0xE) => {
-                let byte = self.fetch(io);
-                debug_println!("CPI #${:02X}", byte);
+                let value = self.fetch(io);
+                debug_println!("CPI #${:02X}", value);
+                self.compare(value);
+            }
 
-                let (res, cy) = self.register_read(Register::A).overflowing_sub(byte);
-                self.update_flag_z(res);
-                self.update_flag_s(res);
-                self.update_flag_p(res);
-                self.update_flag(Flag::C, cy);
+            // CMP
+            (0xB, 0x8..=0xF) => {
+                let src = MemReg::from(op_lo - 0x8);
+                debug_println!("CMP {:?}", src);
+
+                let value = self.location_read(io, src);
+                self.compare(value);
             }
 
             // LXI
@@ -231,29 +487,68 @@ impl Cpu8080 {
                     MemReg::Register(Register::from(src))
                 };
 
+                debug_println!("MOV {:?}, {:?}", dst, src);
+
                 let byte = self.location_read(io, src);
                 self.location_write(io, dst, byte);
-
-                debug_println!("MOV {:?}, {:?}", dst, src);
             }
 
             // LDAX
             (0x0 | 0x1, 0xA) => {
                 let reg = [Register::B, Register::D][op_hi as usize];
+                debug_println!("LDAX {:?}", reg);
+
                 let addr = self.register_read_word(reg);
                 self.register_write(Register::A, io.read(addr));
+            }
 
-                debug_println!("LDAX {:?}", reg);
+            // STAX
+            (0x0 | 0x1, 0x2) => {
+                let reg = [Register::B, Register::D][op_hi as usize];
+                debug_println!("STAX {:?}", reg);
+
+                let addr = self.register_read_word(reg);
+                io.write(addr, self.register_read(Register::A));
             }
 
             // INX
             (0x0..=0x3, 0x3) => {
                 use Register::*;
                 let dst = [B, D, H, SP][op_hi as usize];
+                debug_println!("INX {:?}", dst);
+
                 let word = self.register_read_word(dst);
                 self.register_write_word(dst, word.wrapping_add(1));
+            }
 
-                debug_println!("INX {:?}", dst);
+            // INR
+            (0x0..=0x3, 0x4 | 0xC) => {
+                let dst = (op >> 3) & 0x7;
+                let dst = if dst == 6 {
+                    MemReg::Memory
+                } else {
+                    MemReg::Register(Register::from(dst))
+                };
+
+                debug_println!("INR {:?}", dst);
+
+                let byte = self.location_read(io, dst);
+                let new_value = byte.wrapping_add(1);
+                self.location_write(io, dst, new_value);
+
+                self.update_flag_z(new_value);
+                self.update_flag_s(new_value);
+                self.update_flag_p(new_value);
+            }
+
+            // DCX
+            (0x0..=0x3, 0xB) => {
+                use Register::*;
+                let dst = [B, D, H, SP][op_hi as usize];
+                debug_println!("DCX {:?}", dst);
+
+                let word = self.register_read_word(dst);
+                self.register_write_word(dst, word.wrapping_sub(1));
             }
 
             // DCR
@@ -265,6 +560,8 @@ impl Cpu8080 {
                     MemReg::Register(Register::from(dst))
                 };
 
+                debug_println!("DCR {:?}", dst);
+
                 let byte = self.location_read(io, dst);
                 let new_value = byte.wrapping_sub(1);
                 self.location_write(io, dst, new_value);
@@ -272,8 +569,22 @@ impl Cpu8080 {
                 self.update_flag_z(new_value);
                 self.update_flag_s(new_value);
                 self.update_flag_p(new_value);
+            }
 
-                debug_println!("DCR {:?}", dst);
+            // SHLD
+            (0x2, 0x2) => {
+                let addr = self.fetch_word(io);
+                debug_println!("SHLD ${:04X}", addr);
+                io.write(addr, self.register_read(Register::L));
+                io.write(addr + 1, self.register_read(Register::H));
+            }
+
+            // LHLD
+            (0x2, 0xA) => {
+                let addr = self.fetch_word(io);
+                debug_println!("LHLD ${:04X}", addr);
+                self.register_write(Register::L, io.read(addr));
+                self.register_write(Register::H, io.read(addr + 1));
             }
 
             // PUSH
@@ -291,7 +602,6 @@ impl Cpu8080 {
             (0xC..=0xF, 0x1) => {
                 use Register::*;
                 let dst = [B, D, H, A][(op_hi - 0xC) as usize];
-
                 debug_println!("POP {:?}", dst);
 
                 let word = self.pop(io);
@@ -322,6 +632,32 @@ impl Cpu8080 {
                 self.register_write_word(Register::D, hl);
             }
 
+            // XTHL
+            (0xE, 0x3) => {
+                debug_println!("XTHL");
+
+                let h = self.register_read(Register::H);
+                let l = self.register_read(Register::L);
+
+                self.register_write(Register::H, io.read(self.sp + 1));
+                self.register_write(Register::L, io.read(self.sp));
+
+                io.write(self.sp + 1, h);
+                io.write(self.sp, l);
+            }
+
+            // SPHL
+            (0xF, 0x9) => {
+                debug_println!("SPHL");
+                self.sp = self.register_read_word(Register::H);
+            }
+
+            // PCHL
+            (0xE, 0x9) => {
+                debug_println!("PCHL");
+                self.jump(self.register_read_word(Register::H));
+            }
+
             // RRC
             (0x0, 0xF) => {
                 debug_println!("RRC");
@@ -329,6 +665,48 @@ impl Cpu8080 {
                 let a = self.register_read(Register::A);
                 let cy = a & 1 > 0;
                 self.register_write(Register::A, a.rotate_right(1));
+                self.update_flag(Flag::C, cy);
+            }
+
+            // RLC
+            (0x0, 0x7) => {
+                debug_println!("RLC");
+
+                let a = self.register_read(Register::A);
+                let cy = a & (1 << 7) > 0;
+                self.register_write(Register::A, a.rotate_left(1));
+                self.update_flag(Flag::C, cy);
+            }
+
+            // RAR
+            (0x1, 0xF) => {
+                debug_println!("RAR");
+
+                let a = self.register_read(Register::A);
+                let cy = a & 1 > 0;
+                let rot_a = a.rotate_right(1);
+                let new_a = if self.get_flag(Flag::C) {
+                    rot_a | (1 << 7)
+                } else {
+                    rot_a & !(1 << 7)
+                };
+                self.register_write(Register::A, new_a);
+                self.update_flag(Flag::C, cy);
+            }
+
+            // RAL
+            (0x1, 0x7) => {
+                debug_println!("RAL");
+
+                let a = self.register_read(Register::A);
+                let cy = a & (1 << 7) > 0;
+                let rot_a = a.rotate_left(1);
+                let new_a = if self.get_flag(Flag::C) {
+                    rot_a | 1
+                } else {
+                    rot_a & !1
+                };
+                self.register_write(Register::A, new_a);
                 self.update_flag(Flag::C, cy);
             }
 
@@ -346,22 +724,6 @@ impl Cpu8080 {
                 self.update_flag_s(new_value);
                 self.update_flag_p(new_value);
                 self.update_flag(Flag::C, false);
-            }
-
-            // ADI
-            (0xC, 0x6) => {
-                let byte = self.fetch(io);
-
-                debug_println!("ADI #${:02X}", byte);
-
-                let a = self.register_read(Register::A);
-                let (new_value, cy) = a.overflowing_add(byte);
-
-                self.register_write(Register::A, new_value);
-                self.update_flag_z(new_value);
-                self.update_flag_s(new_value);
-                self.update_flag_p(new_value);
-                self.update_flag(Flag::C, cy);
             }
 
             // LDA
@@ -407,6 +769,13 @@ impl Cpu8080 {
                 self.arithmetic(io, src, |a, rhs| (a & rhs, false));
             }
 
+            // ANA
+            (0xB, 0x0..=0x7) => {
+                let src = MemReg::from(op_lo);
+                debug_println!("ORA {:?}", src);
+                self.arithmetic(io, src, |a, rhs| (a | rhs, false));
+            }
+
             // XRA
             (0xA, 0x8..=0xF) => {
                 let src = MemReg::from(op_lo - 0x8);
@@ -414,28 +783,91 @@ impl Cpu8080 {
                 self.arithmetic(io, src, |a, rhs| (a ^ rhs, false));
             }
 
+            // ADI, ACI
+            (0xC, 0x6 | 0xE) => {
+                let is_aci = op_lo == 0xE;
+                let addend = self.fetch(io);
+                debug_println!("{} #${:02X}", if is_aci { "ACI" } else { "ADI" }, addend);
+                let c_in = is_aci && self.get_flag(Flag::C);
+                self.arithmetic(io, MemReg::Immediate(addend), |a, rhs| {
+                    a.carrying_add(rhs, c_in)
+                });
+            }
+
+            // SUI, SBI
+            (0xD, 0x6 | 0xE) => {
+                let is_aci = op_lo == 0xE;
+                let subtrahend = self.fetch(io);
+                debug_println!(
+                    "{} #${:02X}",
+                    if is_aci { "SUI" } else { "SBI" },
+                    subtrahend
+                );
+                let c_in = is_aci && self.get_flag(Flag::C);
+                self.arithmetic(io, MemReg::Immediate(subtrahend), |a, rhs| {
+                    a.borrowing_sub(rhs, c_in)
+                });
+            }
+
+            // ORI
+            (0xF, 0x6) => {
+                let orand = self.fetch(io);
+                debug_println!("ORI #${:02X}", orand);
+                self.arithmetic(io, MemReg::Immediate(orand), |a, rhs| (a | rhs, false));
+            }
+
+            // XRI
+            (0xE, 0xE) => {
+                let orand = self.fetch(io);
+                debug_println!("XRI #${:02X}", orand);
+                self.arithmetic(io, MemReg::Immediate(orand), |a, rhs| (a ^ rhs, false));
+            }
+
+            // STC
+            (0x3, 0x7) => {
+                debug_println!("STC");
+                self.update_flag(Flag::C, true);
+            }
+
+            // CMC
+            (0x3, 0xF) => {
+                debug_println!("CMC");
+                let c = self.get_flag(Flag::C);
+                self.update_flag(Flag::C, !c);
+            }
+
+            // CMA
+            (0x2, 0xF) => {
+                debug_println!("CMA");
+                let a = self.register_read(Register::A);
+                self.register_write(Register::A, !a);
+            }
+
             // OUT
             (0xD, 0x3) => {
-                let byte = self.fetch(io);
-
-                debug_println!("OUT #${:02X}", byte);
-
-                // TODO: Implement OUT d8
+                let port = self.fetch(io);
+                debug_println!("OUT #${:02X}", port);
+                io.port_write(port, self.register_read(Register::A));
             }
 
             // IN
             (0xD, 0xB) => {
-                let byte = self.fetch(io);
-
-                debug_println!("IN #${:02X}", byte);
-
-                // TODO: Implement IN d8
+                let port = self.fetch(io);
+                debug_println!("IN #${:02X}", port);
+                self.register_write(Register::A, io.port_read(port));
             }
 
             _ => {
                 debug_println!("UNKNOWN");
                 panic!("Unsupported instruction encountered: ${:02X}", op);
             }
+        }
+    }
+
+    pub fn raise_int<IO: IOManager>(&mut self, io: &mut IO, int_num: u16) {
+        if self.interrupt_enabled {
+            debug_println!("RST {}", int_num);
+            self.call(io, int_num * 8);
         }
     }
 
@@ -479,7 +911,7 @@ impl Cpu8080 {
     }
 
     /// Get the value of a CPU flag
-    fn get_flag(&mut self, flag: Flag) -> bool {
+    fn get_flag(&self, flag: Flag) -> bool {
         (self.flags & (flag as Byte)) != 0
     }
 
@@ -493,6 +925,7 @@ impl Cpu8080 {
             MemReg::Register(r) => {
                 self.register_write(r, byte);
             }
+            MemReg::Immediate(_) => panic!("Cannot write to location immediate"),
         }
     }
 
@@ -504,12 +937,58 @@ impl Cpu8080 {
                 io.read(addr)
             }
             MemReg::Register(r) => self.register_read(r),
+            MemReg::Immediate(i) => i,
         }
     }
 
     /// Perform a jump
     fn jump(&mut self, addr: Address) {
+        // TODO: REMOVE FOR NORMAL OPERATION
+        // if addr == 0x0000 {
+        //     println!("WARM BOOT");
+        //     std::process::exit(0);
+        // }
         self.pc = addr;
+    }
+
+    /// Perform a subroutine call
+    fn call<IO: IOManager>(&mut self, io: &mut IO, addr: Address) {
+        // TODO: REMOVE FOR NORMAL OPERATION
+        // if addr == 0x0005 {
+        //     let c = self.register_read(Register::C);
+        //     if c == 9 {
+        //         let offset = self.register_read_word(Register::D) + 3;
+        //         print!("!-----\n!");
+        //         for i in 0.. {
+        //             let ch = io.read(offset + i) as u32;
+        //             let ch = char::from_u32(ch).expect("valid char in print str routine");
+        //             if ch == '$' {
+        //                 break;
+        //             }
+        //             print!("{}", ch);
+        //         }
+        //         println!("\n!----");
+        //         panic!();
+        //     } else if c == 2 {
+        //         // println!(
+        //         //     "{}",
+        //         //     char::from_u32(self.register_read(Register::E) as u32)
+        //         //         .expect("valid char in print char routine")
+        //         // );
+        //     }
+        // } else {
+        // }
+        self.push(io, self.pc);
+        self.jump(addr);
+    }
+
+    /// Perform a compare with accumulator
+    fn compare(&mut self, value: Byte) {
+        let (res, cy) = self.register_read(Register::A).overflowing_sub(value);
+        self.update_flag_z(res);
+        self.update_flag_s(res);
+        self.update_flag_p(res);
+        self.update_flag(Flag::C, cy);
     }
 
     /// Perform a return from subroutine
@@ -521,16 +1000,17 @@ impl Cpu8080 {
     /// Push a word onto the stack
     fn push<IO: IOManager>(&mut self, io: &mut IO, word: Word) {
         for b in word.to_be_bytes() {
-            io.write(self.sp, b);
             self.sp -= 1;
+            io.write(self.sp, b);
         }
     }
 
     /// Pop a word from the stack
     fn pop<IO: IOManager>(&mut self, io: &IO) -> Word {
         u16::from_le_bytes([(); 2].map(|_| {
+            let b = io.read(self.sp);
             self.sp += 1;
-            io.read(self.sp)
+            b
         }))
     }
 
@@ -580,11 +1060,22 @@ impl Cpu8080 {
 
     /// Write a byte to a register
     fn register_write(&mut self, dst: Register, byte: Byte) {
-        self.gprs[dst.offset()] = byte;
+        // self.gprs[dst.offset()] = byte;
+        use Register::*;
+        match dst {
+            A => self.gpr_a = byte,
+            B => self.gpr_b = byte,
+            C => self.gpr_c = byte,
+            D => self.gpr_d = byte,
+            E => self.gpr_e = byte,
+            H => self.gpr_h = byte,
+            L => self.gpr_l = byte,
+            _ => panic!("Invalid register for register_write"),
+        }
     }
 
     /// Read a word from a register pair
-    fn register_read_word(&mut self, src: Register) -> Word {
+    fn register_read_word(&self, src: Register) -> Word {
         use Register::*;
 
         match src {
@@ -614,8 +1105,19 @@ impl Cpu8080 {
     }
 
     /// Read a byte from a register
-    fn register_read(&mut self, src: Register) -> Byte {
-        self.gprs[src.offset()]
+    fn register_read(&self, src: Register) -> Byte {
+        // self.gprs[dst.offset()]
+        use Register::*;
+        match src {
+            A => self.gpr_a,
+            B => self.gpr_b,
+            C => self.gpr_c,
+            D => self.gpr_d,
+            E => self.gpr_e,
+            H => self.gpr_h,
+            L => self.gpr_l,
+            _ => panic!("Invalid register for register_write"),
+        }
     }
 }
 
@@ -634,6 +1136,14 @@ mod tests {
 
         fn write(&mut self, addr: Address, byte: Byte) {
             self.mem[addr as usize] = byte;
+        }
+
+        fn port_write(&mut self, _port: Byte, _byte: Byte) {
+            unimplemented!()
+        }
+
+        fn port_read(&mut self, _port: Byte) -> Byte {
+            unimplemented!()
         }
     }
 
@@ -680,8 +1190,8 @@ mod tests {
             cpu.sp = 0x0FF;
             cpu.step(&mut io);
             assert_eq!(cpu.pc, 0x0010, "new pc");
-            assert_eq!(io.read(cpu.sp + 2), 0x00, "return address hi");
-            assert_eq!(io.read(cpu.sp + 1), 0x03, "return address lo");
+            assert_eq!(io.read(cpu.sp + 1), 0x00, "return address hi");
+            assert_eq!(io.read(cpu.sp), 0x03, "return address lo");
         }
 
         {
@@ -690,8 +1200,8 @@ mod tests {
             assert_eq!(cpu.pc, 0x0000);
             cpu.step(&mut io);
             assert_eq!(cpu.pc, 0xABCD, "new pc");
-            assert_eq!(io.read(cpu.sp + 2), 0x00, "return address hi");
-            assert_eq!(io.read(cpu.sp + 1), 0x03, "return address lo");
+            assert_eq!(io.read(cpu.sp + 1), 0x00, "return address hi");
+            assert_eq!(io.read(cpu.sp), 0x03, "return address lo");
         }
     }
 
@@ -918,8 +1428,8 @@ mod tests {
                 cpu.register_write_word(reg, val);
 
                 cpu.step(&mut io);
-                assert_eq!(io.read(cpu.sp + 1), lo, "PUSH {:?} (val={:04X})", reg, val);
-                assert_eq!(io.read(cpu.sp + 2), hi, "PUSH {:?} (val={:04X})", reg, val);
+                assert_eq!(io.read(cpu.sp), lo, "PUSH {:?} (val={:04X})", reg, val);
+                assert_eq!(io.read(cpu.sp + 1), hi, "PUSH {:?} (val={:04X})", reg, val);
 
                 // overwrite with dummy value
                 cpu.register_write_word(reg, 0xD8D8);
